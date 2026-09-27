@@ -1,0 +1,3 @@
+# Garante quebras de linha LF em qualquer sistema (inclusive Windows),
+# para o Prettier e os scripts se comportarem igual em todas as máquinas.
+* text=auto eol=lf

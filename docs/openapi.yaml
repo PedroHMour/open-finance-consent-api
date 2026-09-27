@@ -1,0 +1,730 @@
+openapi: 3.1.0
+info:
+  title: Open Finance Consent API
+  version: 2.0.0
+  description: |
+    API de consentimentos e compartilhamento de dados de contas **inspirada no Open Finance Brasil**.
+
+    ## Participantes
+    - **Instituição receptora (TPP):** quem pede os dados. Autentica com `client_credentials` em `/oauth/token`.
+    - **Titular (cliente do banco):** dono dos dados. Autentica em `/customer/login` e autoriza, rejeita ou revoga consentimentos.
+
+    ## Fluxo
+    1. A receptora cria o consentimento (`POST /open-banking/consents/v1/consents`) → `AWAITING_AUTHORISATION`.
+    2. O titular autoriza escolhendo as contas (`POST /customer/consents/{consentId}/authorise`) → `AUTHORISED`.
+    3. A receptora lê os dados enviando o header `x-consent-id`.
+    4. Titular ou receptora podem revogar a qualquer momento → `REJECTED`.
+
+    ## Convenções
+    - Respostas no envelope `{ data, links, meta }`; erros em `{ errors, meta }`.
+    - Valores monetários como string com 2 casas (`"1500.75"`), nunca número de ponto flutuante.
+    - Toda resposta devolve `x-fapi-interaction-id` para correlação de logs e auditoria.
+
+    ## Credenciais de demonstração (após `db:seed`)
+    - Receptora: `client_id=fintech-exemplo`, `client_secret=fintech-exemplo-secret`
+    - Titular: CPF `52998224725`, senha `Senha@123`
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: http://localhost:3000
+    description: Local
+tags:
+  - name: Autenticação
+    description: Emissão de tokens para receptoras e titulares.
+  - name: Consentimentos (receptora)
+    description: Criação, consulta e revogação de consentimentos pela instituição receptora.
+  - name: Dados (receptora)
+    description: Dados de contas liberados por um consentimento autorizado.
+  - name: Titular
+    description: 'Ações do dono dos dados: ver, autorizar, rejeitar e revogar
+      consentimentos.'
+  - name: Infra
+    description: Operação da API.
+
+paths:
+  /oauth/token:
+    post:
+      tags: [Autenticação]
+      summary: Token da instituição receptora (client_credentials)
+      description: Aceita credenciais no corpo ou via HTTP Basic, conforme a RFC 6749.
+        Erros seguem o formato da RFC.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type]
+              properties:
+                grant_type: { type: string, enum: [client_credentials] }
+                client_id: { type: string, examples: [fintech-exemplo] }
+                client_secret: { type: string, examples: [fintech-exemplo-secret] }
+      responses:
+        '200':
+          description: Token emitido
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string }
+                  token_type: { type: string, const: Bearer }
+                  expires_in: { type: integer, examples: [900] }
+        '400': { $ref: '#/components/responses/OAuthError' }
+        '401': { $ref: '#/components/responses/OAuthError' }
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+      operationId: issueClientToken
+
+  /customer/login:
+    post:
+      tags: [Autenticação]
+      summary: Login do titular
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cpf, password]
+              properties:
+                cpf: { type: string, examples: ['529.982.247-25'] }
+                password: { type: string, examples: ['Senha@123'] }
+      responses:
+        '200':
+          description: Autenticado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+                  tokenType: { type: string, const: Bearer }
+                  expiresIn: { type: integer }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+      operationId: loginCustomer
+
+  /open-banking/consents/v1/consents:
+    post:
+      tags: [Consentimentos (receptora)]
+      summary: Criar consentimento
+      security: [{ clientToken: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/InteractionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateConsentRequest' }
+      responses:
+        '201':
+          description: Consentimento criado. Repetir com a mesma chave devolve a mesma
+            resposta (header `x-idempotency-replayed`).
+          headers:
+            x-fapi-interaction-id: { $ref: '#/components/headers/InteractionId' }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Consent' }
+                  links: { $ref: '#/components/schemas/Links' }
+                  meta: { $ref: '#/components/schemas/Meta' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+      operationId: createConsent
+
+  /open-banking/consents/v1/consents/{consentId}:
+    parameters:
+      - $ref: '#/components/parameters/ConsentIdPath'
+    get:
+      tags: [Consentimentos (receptora)]
+      summary: Consultar consentimento
+      security: [{ clientToken: [] }]
+      responses:
+        '200':
+          description: Consentimento
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Consent' }
+                  links: { $ref: '#/components/schemas/Links' }
+                  meta: { $ref: '#/components/schemas/Meta' }
+        '404': { $ref: '#/components/responses/Error' }
+        '401':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '400':
+          $ref: '#/components/responses/Error'
+      operationId: getConsent
+    delete:
+      tags: [Consentimentos (receptora)]
+      summary: Revogar consentimento
+      security: [{ clientToken: [] }]
+      responses:
+        '204': { description: Revogado }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '401':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '400':
+          $ref: '#/components/responses/Error'
+      operationId: revokeConsent
+
+  /open-banking/resources/v1/resources:
+    get:
+      tags: [Dados (receptora)]
+      summary: Recursos compartilhados (RESOURCES_READ)
+      security: [{ clientToken: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ConsentIdHeader'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Recursos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        resourceId: { type: string, format: uuid }
+                        type: { type: string, const: ACCOUNT }
+                        status: { type: string, const: AVAILABLE }
+                  links: { $ref: '#/components/schemas/Links' }
+                  meta: { $ref: '#/components/schemas/Meta' }
+        '403': { $ref: '#/components/responses/Error' }
+        '401':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '400':
+          $ref: '#/components/responses/Error'
+      operationId: listResources
+
+  /open-banking/accounts/v1/accounts:
+    get:
+      tags: [Dados (receptora)]
+      summary: Contas compartilhadas (ACCOUNTS_READ)
+      security: [{ clientToken: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ConsentIdHeader'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Contas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Account' } }
+                  links: { $ref: '#/components/schemas/Links' }
+                  meta: { $ref: '#/components/schemas/Meta' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '401':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+      operationId: listAccounts
+
+  /open-banking/accounts/v1/accounts/{accountId}:
+    get:
+      tags: [Dados (receptora)]
+      summary: Detalhe da conta (ACCOUNTS_READ)
+      security: [{ clientToken: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+        - $ref: '#/components/parameters/ConsentIdHeader'
+      responses:
+        '200':
+          description: Conta
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Account' }
+                  links: { $ref: '#/components/schemas/Links' }
+                  meta: { $ref: '#/components/schemas/Meta' }
+        '403': { $ref: '#/components/responses/Error' }
+        '401':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '400':
+          $ref: '#/components/responses/Error'
+      operationId: getAccount
+
+  /open-banking/accounts/v1/accounts/{accountId}/balances:
+    get:
+      tags: [Dados (receptora)]
+      summary: Saldos (ACCOUNTS_BALANCES_READ)
+      security: [{ clientToken: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+        - $ref: '#/components/parameters/ConsentIdHeader'
+      responses:
+        '200':
+          description: Saldos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Balances' }
+                  links: { $ref: '#/components/schemas/Links' }
+                  meta: { $ref: '#/components/schemas/Meta' }
+        '403': { $ref: '#/components/responses/Error' }
+        '401':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '400':
+          $ref: '#/components/responses/Error'
+      operationId: getAccountBalances
+
+  /open-banking/accounts/v1/accounts/{accountId}/transactions:
+    get:
+      tags: [Dados (receptora)]
+      summary: Transações (ACCOUNTS_TRANSACTIONS_READ)
+      description: Datas em UTC, intervalo inclusivo. Sem filtro, retorna os últimos
+        90 dias.
+      security: [{ clientToken: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+        - $ref: '#/components/parameters/ConsentIdHeader'
+        - { name: fromBookingDate, in: query, schema: { type: string, format: date } }
+        - { name: toBookingDate, in: query, schema: { type: string, format: date } }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Transações, mais recentes primeiro
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Transaction' } }
+                  links: { $ref: '#/components/schemas/Links' }
+                  meta: { $ref: '#/components/schemas/Meta' }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '401':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '400':
+          $ref: '#/components/responses/Error'
+      operationId: listAccountTransactions
+
+  /customer/accounts:
+    get:
+      tags: [Titular]
+      summary: Contas do titular (para escolher o que compartilhar)
+      security: [{ customerToken: [] }]
+      responses:
+        '200':
+          description: Contas com saldos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      allOf:
+                        - $ref: '#/components/schemas/Account'
+                        - type: object
+                          properties:
+                            balances: { $ref: '#/components/schemas/Balances' }
+                  links: { $ref: '#/components/schemas/Links' }
+                  meta: { $ref: '#/components/schemas/Meta' }
+        '401':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+      operationId: listCustomerAccounts
+
+  /customer/consents:
+    get:
+      tags: [Titular]
+      summary: Consentimentos do titular
+      security: [{ customerToken: [] }]
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/ConsentStatus' }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Lista paginada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/CustomerConsent' } }
+                  links: { $ref: '#/components/schemas/Links' }
+                  meta: { $ref: '#/components/schemas/Meta' }
+        '401':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+      operationId: listCustomerConsents
+
+  /customer/consents/{consentId}:
+    get:
+      tags: [Titular]
+      summary: Detalhe do consentimento
+      security: [{ customerToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/ConsentIdPath' }]
+      responses:
+        '200': { $ref: '#/components/responses/CustomerConsent' }
+        '404': { $ref: '#/components/responses/Error' }
+        '401':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '400':
+          $ref: '#/components/responses/Error'
+      operationId: getCustomerConsent
+
+  /customer/consents/{consentId}/authorise:
+    post:
+      tags: [Titular]
+      summary: Autorizar escolhendo as contas
+      security: [{ customerToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/ConsentIdPath' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountIds]
+              properties:
+                accountIds:
+                  type: array
+                  minItems: 1
+                  maxItems: 20
+                  uniqueItems: true
+                  items: { type: string, format: uuid }
+      responses:
+        '200': { $ref: '#/components/responses/CustomerConsent' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '401':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '400':
+          $ref: '#/components/responses/Error'
+      operationId: authoriseConsent
+
+  /customer/consents/{consentId}/reject:
+    post:
+      tags: [Titular]
+      summary: Rejeitar (antes de autorizar)
+      security: [{ customerToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/ConsentIdPath' }]
+      responses:
+        '200': { $ref: '#/components/responses/CustomerConsent' }
+        '422': { $ref: '#/components/responses/Error' }
+        '401':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '400':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+      operationId: rejectConsent
+
+  /customer/consents/{consentId}/revoke:
+    post:
+      tags: [Titular]
+      summary: Revogar (depois de autorizar)
+      security: [{ customerToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/ConsentIdPath' }]
+      responses:
+        '200': { $ref: '#/components/responses/CustomerConsent' }
+        '422': { $ref: '#/components/responses/Error' }
+        '401':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '400':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+      operationId: revokeCustomerConsent
+
+  /health:
+    get:
+      tags: [Infra]
+      summary: Health check (verifica o banco)
+      security: []
+      responses:
+        '200': { description: API e banco no ar }
+        '503': { description: Banco indisponível }
+      operationId: healthCheck
+
+components:
+  securitySchemes:
+    clientToken:
+      type: http
+      scheme: bearer
+      description: Token de instituição receptora, obtido em /oauth/token.
+    customerToken:
+      type: http
+      scheme: bearer
+      description: Token de titular, obtido em /customer/login.
+
+  parameters:
+    ConsentIdPath:
+      name: consentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AccountIdPath:
+      name: accountId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ConsentIdHeader:
+      name: x-consent-id
+      in: header
+      required: true
+      description: Consentimento AUTHORISED que concede a permissão exigida pelo endpoint.
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: x-idempotency-key
+      in: header
+      required: true
+      schema: { type: string, maxLength: 128 }
+    InteractionId:
+      name: x-fapi-interaction-id
+      in: header
+      required: false
+      description: UUID de correlação. Se omitido, a API gera um.
+      schema: { type: string, format: uuid }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: page-size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+
+  headers:
+    InteractionId:
+      schema: { type: string, format: uuid }
+
+  responses:
+    Error:
+      description: 'Erro no envelope { errors, meta }. Ex.: 401 UNAUTHORIZED, 403
+        WRONG_TOKEN_TYPE / PERMISSION_NOT_GRANTED, 422 CONSENT_INVALID_STATUS.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    OAuthError:
+      description: Erro OAuth 2.0 (RFC 6749)
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                { type: string, enum: [invalid_request, invalid_client, unsupported_grant_type] }
+              error_description: { type: string }
+    CustomerConsent:
+      description: Consentimento na visão do titular
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data: { $ref: '#/components/schemas/CustomerConsent' }
+              links: { $ref: '#/components/schemas/Links' }
+              meta: { $ref: '#/components/schemas/Meta' }
+    TooManyRequests:
+      description: Limite de requisições excedido
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    Permission:
+      type: string
+      enum: [ACCOUNTS_READ, ACCOUNTS_BALANCES_READ, ACCOUNTS_TRANSACTIONS_READ, RESOURCES_READ]
+    ConsentStatus:
+      type: string
+      enum: [AWAITING_AUTHORISATION, AUTHORISED, REJECTED]
+
+    CreateConsentRequest:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [loggedUser, permissions]
+          properties:
+            loggedUser:
+              type: object
+              required: [document]
+              properties:
+                document:
+                  type: object
+                  required: [identification, rel]
+                  properties:
+                    identification: { type: string, examples: ['52998224725'] }
+                    rel: { type: string, const: CPF }
+            permissions:
+              type: array
+              description: Deve conter RESOURCES_READ e ACCOUNTS_READ.
+              items: { $ref: '#/components/schemas/Permission' }
+              examples:
+                [
+                  [
+                    ACCOUNTS_READ,
+                    ACCOUNTS_BALANCES_READ,
+                    ACCOUNTS_TRANSACTIONS_READ,
+                    RESOURCES_READ,
+                  ],
+                ]
+            expirationDateTime:
+              type: string
+              format: date-time
+              description: Opcional. Padrão e máximo definidos por CONSENT_MAX_DAYS (365
+                dias).
+
+    Consent:
+      type: object
+      properties:
+        consentId: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/ConsentStatus' }
+        permissions: { type: array, items: { $ref: '#/components/schemas/Permission' } }
+        creationDateTime: { type: string, format: date-time }
+        statusUpdateDateTime: { type: string, format: date-time }
+        expirationDateTime: { type: string, format: date-time }
+        rejection:
+          type: object
+          description: Presente apenas quando status = REJECTED.
+          properties:
+            rejectedBy: { type: string, enum: [USER, TPP, ASPSP] }
+            reason:
+              type: object
+              properties:
+                code:
+                  type: string
+                  enum:
+                    - CUSTOMER_MANUALLY_REJECTED
+                    - CUSTOMER_MANUALLY_REVOKED
+                    - CLIENT_REVOKED
+                    - CONSENT_MAX_DATE_REACHED
+                    - CONSENT_EXPIRED
+
+    CustomerConsent:
+      allOf:
+        - $ref: '#/components/schemas/Consent'
+        - type: object
+          properties:
+            requestedBy:
+              type: object
+              properties:
+                name: { type: string }
+                cnpj: { type: string }
+            sharedAccountIds: { type: array, items: { type: string, format: uuid } }
+
+    Amount:
+      type: object
+      properties:
+        amount: { type: string, pattern: '^-?\d+\.\d{2}$', examples: ['1500.75'] }
+        currency: { type: string, examples: [BRL] }
+
+    Account:
+      type: object
+      properties:
+        accountId: { type: string, format: uuid }
+        brandName: { type: string }
+        type:
+          { type: string, enum: [CONTA_DEPOSITO_A_VISTA, CONTA_POUPANCA, CONTA_PAGAMENTO_PRE_PAGA] }
+        branchCode: { type: string }
+        number: { type: string }
+        checkDigit: { type: string }
+        currency: { type: string }
+
+    Balances:
+      type: object
+      properties:
+        availableAmount: { $ref: '#/components/schemas/Amount' }
+        blockedAmount: { $ref: '#/components/schemas/Amount' }
+        updateDateTime: { type: string, format: date-time }
+
+    Transaction:
+      type: object
+      properties:
+        transactionId: { type: string, format: uuid }
+        type: { type: string, enum: [PIX, TED, BOLETO, CARTAO, PACOTE_TARIFA_SERVICOS, OUTROS] }
+        creditDebitType: { type: string, enum: [CREDITO, DEBITO] }
+        transactionName: { type: string }
+        counterpartyName: { type: [string, 'null'] }
+        transactionDateTime: { type: string, format: date-time }
+        transactionAmount: { $ref: '#/components/schemas/Amount' }
+
+    Links:
+      type: object
+      properties:
+        self: { type: string, format: uri }
+        first: { type: string, format: uri }
+        prev: { type: string, format: uri }
+        next: { type: string, format: uri }
+        last: { type: string, format: uri }
+
+    Meta:
+      type: object
+      properties:
+        totalRecords: { type: integer }
+        totalPages: { type: integer }
+        requestDateTime: { type: string, format: date-time }
+
+    ErrorResponse:
+      type: object
+      properties:
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              code: { type: string, examples: [PERMISSION_NOT_GRANTED] }
+              title: { type: string }
+              detail: { type: string }
+        meta: { $ref: '#/components/schemas/Meta' }

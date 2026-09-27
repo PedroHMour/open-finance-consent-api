@@ -1,57 +1,39 @@
-version: '3.8'
-
 services:
-  postgres:
+  db:
     image: postgres:16-alpine
-    container_name: openfinance-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: openfinance
-      POSTGRES_PASSWORD: openfinance123
-      POSTGRES_DB: openfinancedb
+      POSTGRES_PASSWORD: openfinance
+      POSTGRES_DB: openfinance
+    # Exposto só na máquina local e na porta 5433, para não conflitar com um Postgres já instalado.
+    # A API não usa esta porta (fala com o banco pela rede interna do compose).
     ports:
-      - "5432:5432"
+      - '127.0.0.1:${DB_HOST_PORT:-5433}:5432'
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - openfinance-network
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U openfinance -d openfinancedb"]
-      interval: 10s
+      test: ['CMD-SHELL', 'pg_isready -U openfinance -d openfinance']
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: openfinance-api
+    build: .
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - '3000:3000'
     environment:
-      NODE_ENV: development
+      NODE_ENV: production
       PORT: 3000
-      DATABASE_URL: "postgresql://openfinance:openfinance123@postgres:5432/openfinancedb?schema=public"
-      JWT_SECRET: jwt_secret_openfinance_2024
-      JWT_EXPIRES_IN: 1h
-      JWT_REFRESH_SECRET: refresh_secret_openfinance_2024
-      JWT_REFRESH_EXPIRES_IN: 7d
-      RATE_LIMIT_WINDOW_MS: 900000
-      RATE_LIMIT_MAX: 100
       LOG_LEVEL: info
+      DATABASE_URL: postgresql://openfinance:openfinance@db:5432/openfinance
+      # Lido do arquivo .env (copie o .env.example). O segredo não fica versionado aqui.
+      JWT_SECRET: ${JWT_SECRET:?Defina JWT_SECRET no arquivo .env}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
     depends_on:
-      postgres:
+      db:
         condition: service_healthy
-    volumes:
-      - .:/app
-      - /app/node_modules
-    networks:
-      - openfinance-network
 
 volumes:
-  postgres_data:
-
-networks:
-  openfinance-network:
-    driver: bridge
+  pgdata:

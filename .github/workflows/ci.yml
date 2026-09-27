@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  qualidade-e-testes:
+    name: Lint, tipos, build e testes
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: openfinance
+          POSTGRES_PASSWORD: openfinance
+          POSTGRES_DB: openfinance_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openfinance -d openfinance_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npm run build
+
+      - name: Testes (unitários + integração com Postgres real)
+        run: npm run test:coverage
+        env:
+          TEST_DATABASE_URL: postgresql://openfinance:openfinance@localhost:5432/openfinance_test
+
+  docker:
+    name: Imagem Docker sobe e responde
+    runs-on: ubuntu-latest
+    needs: qualidade-e-testes
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cria .env a partir do exemplo
+        run: cp .env.example .env
+
+      - name: Sobe API + Postgres e espera o health check
+        run: docker compose up -d --build --wait --wait-timeout 120
+
+      - name: Seed e fluxo básico
+        run: |
+          docker compose exec -T api node dist/db/seed.js
+          curl -fsS http://localhost:3000/health
+          curl -fsS -X POST http://localhost:3000/oauth/token \
+            -d grant_type=client_credentials \
+            -d client_id=fintech-exemplo \
+            -d client_secret=fintech-exemplo-secret
+
+      - name: Logs em caso de falha
+        if: failure()
+        run: docker compose logs
+
+      - name: Derruba o ambiente
+        if: always()
+        run: docker compose down -v
